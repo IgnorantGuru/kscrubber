@@ -1,0 +1,60 @@
+README for kscrubber
+
+
+OVERVIEW
+    
+kscrubber is a tool for removing and cleaning specific system files, logs,
+and user files, for the purposes of freeing disk space and removing recent
+activity information.
+
+ - USE AT YOUR OWN RISK - 
+Last tested with KDE 4.4 - By design, kscrubber is a fairly heavy-handed 
+script that removes and modifies a large number of files belonging to the 
+system, KDE, and users. While every attempt is made to avoid breaking 
+software or causing system instability, these outcomes are not impossible. 
+In the unlikely event any instability is encountered, a reboot should 
+correct it, as many of the files that kscrubber removes are temporary files 
+which will be automatically recreated by the system or software. 
+Regardless, it never hurts to have a recent backup of your /home folder and 
+your system. See How To Backup Operating Systems for help. In addition, 
+kscrubber includes a built-in option to create backup copies of files it 
+modifies (see below).
+
+Homepage & Instructions:
+    http://igurublog.wordpress.com/downloads/script-kscrubber/
+
+Downloads:
+    https://github.com/IgnorantGuru/kscrubber
+    https://github.com/IgnorantGuru/kscrubber/tree/master/packages
+
+Debian/Ubuntu PPA:
+    http://igurublog.wordpress.com/downloads/ppa/
+    
+
+INSTALLATION
+
+To install:
+
+    wget https://github.com/IgnorantGuru/kscrubber/raw/master/kscrubber
+    sudo install kscrubber /usr/local/bin/kscrubber
+
+To remove:
+    
+    sudo rm /usr/local/bin/kscrubber
+
+
+LICENSE
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+

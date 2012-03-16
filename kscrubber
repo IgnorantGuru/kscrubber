@@ -1,0 +1,939 @@
+#!/bin/bash
+# Script Name: kscrubber    http://igurublog.wordpress.com/downloads/script-kscrubber/ 
+# Requires: secure-delete sqlite3
+# License: GNU GENERAL PUBLIC LICENSE Version 3 http://www.gnu.org/licenses/gpl-3.0.txt
+
+version="1.2.8"
+applist="amule ark arora avidemux epdfview filelight firefox flash gftp googleearth gqview gwenview k3b kaffeine kate kgrab kmail konqueror kpdf krename krusader ktorrent mplayer okular parcellite smplayer soffice speedcrunch vlc"
+# allowed to be running
+applistalso="akonadi java KDE klipper krunner mlocate nepomuk plasma soprano"
+# no modifications
+applisttest="pidgin"
+
+showhelp ()
+{
+cat << EOF
+kscrubber version $version
+Cleans logs and removes recent activity information from system and
+user files.  This version is designed for use on Ubuntu and Arch with
+a focus on KDE
+Requires: secure-delete sqlite3
+Must be run as root
+Usage: sudo /PATH-TO-SCRIPTS/kscrubber OPTIONS
+Options:
+--clean                        Clean system and user files
+--keepsystem                   Don't clean any system files in /var/log,
+                                 /var/crash, or /tmp
+--keepsystemlogs               Don't clean system logs in /var/log
+--keepuser                     Don't alter user files in /home, /root,
+                                 /var/tmp, or /tmp
+--sim                          Simulate only (also enables --verbose)
+                                 No files will be modified.
+                                 Note: If used with --backup, backup
+                                 files WILL be created
+--force                        Don't halt for any warnings
+--verbose                      Detailed feedback
+--logfile FILE                 Also append output messages to FILE
+                                 (place option first for best results)
+--backup FOLDER                Create backup copies in FOLDER of files
+                                 to be removed or edited.  Note: If used
+                                 with --sim, backup files WILL be created
+--onepass                      Use less secure one-pass wiping of files
+                                 (faster and may be better for SSDs)
+                                 Default is two-pass
+--fullpass                     Use srm default (38-pass) wiping of files
+                                 (more secure but much slower)
+--check PATH "SEARCHSTRING"    Search recursively in PATH for files or
+                                 filenames that contain SEARCHSTRING
+                                 (text or a regular expression).  You may
+                                 include multiple --check options to
+                                 search for multiple strings.
+Instructions and updates:
+http://igurublog.wordpress.com/downloads/script-kscrubber/
+
+Applications cleaned or tested by this version of kscrubber:
+$applist $applistalso $applisttest
+EOF
+	exit 0
+}
+
+log()  # $1=msg   $2=[verb](log only if verbose set)
+{
+	if (( optverbose == 1 )) || [ "$2" = "" ]; then
+		if [ "$logfile" != "" ]; then
+			echo -e "$1" >> "$logfile"
+		fi
+		echo -e "$1"
+	fi
+}
+
+# init
+optclean=0
+optkeepsystem=0
+optkeepsystemlogs=0
+optkeepuser=0
+optforce=0
+optkillindex=0
+checkcount=0
+optsim=0
+optverbose=0
+logfile=""
+backfolder=""
+warns=""
+srm="srm"   # default remove command
+srmarg="-l" # default remove command arguments
+IFS=$'\n'
+
+if [ "$1" = "" ]; then
+	showhelp
+fi
+
+while [ "$1" != "" ];
+do
+	if [ "${1:0:1}" = "-" ]; then
+		case "$1" in
+			--help | -help )
+				showhelp
+				exit 0
+				;;
+			--clean )
+				optclean=1
+				;;
+			--keepsystem )
+				log "kscrubber: Option --keepsystem - keeping system files"
+				optkeepsystem=1
+				;;
+			--keepsystemlogs )
+				log "kscrubber: Option --keepsystemlogs - keeping /var/log"
+				optkeepsystemlogs=1
+				;;
+			--keepuser )
+				log "kscrubber: Option --keepuser - keeping user files"
+				optkeepuser=1
+				;;
+			# It is no longer safe to run --killindex with newer versions of KDE
+			#--killindex )
+			#	optkillindex=1
+			#	;;
+			--sim )
+				log "kscrubber: Option --sim - SIMULATION ONLY"
+				optsim=1
+				optverbose=1
+				warns=$warns"WARNING: This was a SIMULATION ONLY\n"
+				;;
+			--force )
+				optforce=1
+				;;
+			--verbose )
+				optverbose=1
+				;;
+			--onepass )
+				log "kscrubber: Option --onepass - using one-pass wiping (srm -ll)"
+				srmarg="-ll"
+				;;
+			--fullpass )
+				log "kscrubber: Option --fullpass - using 38-pass wiping (srm)"
+				srmarg=""
+				;;
+			--backup )
+				if [ "$2" = "" ] || [ "${2:0:1}" = "-" ]; then
+					log "kscrubber: Option $1 requires one argument"
+					exit 1
+				fi
+				backfolder="$2/kscrubber-$(date +%Y-%m-%d_%H%M%S)"
+				log "kscrubber: Option --backup - using backup folder $backfolder"
+				shift
+				;;
+			--logfile )
+				if [ "$2" = "" ] || [ "${2:0:1}" = "-" ]; then
+					log "kscrubber: Option $1 requires one argument"
+					exit 1
+				fi
+				logfile="$2"
+				# init log file
+				if [ "$logfile" != "" ]; then
+					echo "=======================================================================" >> "$logfile"
+					log "kscrubber version $version started $(date +%Y-%m-%d' '%H:%M:%S) on $HOSTNAME"
+					IFS=" "
+					echo "$0 $*" >> "$logfile"
+					IFS=$'\n'
+					log
+					warns=$warns"WARNING: logfile $logfile may contain private data\n"
+					warns=$warns"         To destroy it: sudo srm $srmarg \"$logfile\"\n"
+					log "kscrubber: Option --logfile - log file $logfile started"
+				fi
+				shift
+				;;
+			--check )
+				if [ "$2" = "" ] || [ "$3" = "" ]; then
+					log "kscrubber: Option $1 requires two arguments"
+					exit 1
+				fi
+				checkpath[checkcount]="$2"
+				checkstring[checkcount]="$3"
+				if [ ! -d "${checkpath[checkcount]}" ]; then
+					log 'kscrubber: invalid --check path "'${checkpath[checkcount]}'"'
+					exit 1
+				fi
+				(( checkcount += 1 ))
+				shift 2
+				;;
+			* )
+				log "kscrubber: Unknown option $1"
+				exit 1
+				;;
+		esac
+	else
+		log "kscrubber: Unwanted arguments"
+		exit 1
+	fi
+	shift
+done
+
+# requirements
+
+# got root?
+if [ "`whoami`" != "root" ]; then
+	log 'kscrubber: must be run as root'
+	exit 2
+fi
+
+# got srm?
+test=`srm | grep "srm v.*van Hauser"`
+if [ "$test" = "" ]; then
+	log 'kscrubber requires the secure-delete package providing srm'
+	log '          Ubuntu use:  sudo apt-get install secure-delete'
+	log '          Arch use:    yaourt -S secure-delete'
+	exit 2
+fi
+
+# got sqlite3?
+test=`sqlite3 -version | grep "command not found"`
+if [ "$test" != "" ]; then
+	log 'kscrubber requires the sqlite3 package'
+	log '          Ubuntu use:  sudo apt-get install sqlite3'
+	log '          Arch use:    pacman -S sqlite3'
+	exit 2
+fi
+
+if (( optclean == 1 )) && (( optkeepsystem == 1 )) && (( optkeepuser == 1 )) && (( optkillindex == 0 )) && (( checkcount == 0 )); then
+	log "kscrubber: nothing to do"
+	exit 0
+fi
+if (( optclean == 0 )) && (( optkillindex == 0 )) && (( checkcount == 0 )); then
+	log "kscrubber: nothing to do  (add --clean to clean your system)"
+	exit 0
+fi
+
+
+# warnings
+
+# --killindex warning
+if ((optkillindex == 1 )); then
+	log
+	log "WARNING: --killindex will attempt to PERMANENTLY disable"
+	log "         Akonadi, Soprano, and Nepomuk servers on this"
+	log "         system, and will erase data used by these"
+	log "         programs.  The Strigi desktop search and other"
+	log "         programs may not run correctly after this change"
+	log "         is made.  USE AT YOUR OWN RISK!"
+	warning=1
+fi
+
+# backup folder warning
+if [ "$backfolder" != "" ]; then
+	if [ -d "$backfolder" ]; then
+		log "WARNING: backup folder $backfolder already exists - files will"
+		log "         not be overwritten"
+		warning=1
+	else
+		mkdir -p "$backfolder"
+		if [ ! -d "$backfolder" ]; then
+			log "kscrubber: ERROR: failed to create backup folder $backfolder"
+			exit 3
+		fi
+	fi
+	warns=$warns"WARNING: backup folder $backfolder\n"
+	warns=$warns"         may contain private data.  To destroy it:\n"
+	warns=$warns"         sudo srm $srmarg -r \"$backfolder\"\n"
+fi
+
+# apps running
+if (( optclean == 1 )); then
+	apps=""
+	IFS=" "
+	for app in $applist
+	do
+		if [ "$app" = "konqueror" ]; then
+			# ignore one preloaded instance of konqueror
+			test=`ps -Af | grep -v " grep " | grep " $app.*--preload"`
+			if [ "$test" != "" ]; then
+				test=`ps -Af | grep -v " grep " | grep -c " $app.*--preload"`
+				if (( test > 1 )); then
+					apps="$apps $app"
+				fi
+			else
+				test=`ps -A | grep " $app"`
+				if [ "$test" != "" ]; then
+					apps="$apps $app"
+				fi
+			fi
+		else
+			test=`ps -A | grep " $app"`
+			if [ "$test" != "" ]; then
+				apps="$apps $app"
+			fi
+		fi
+	done
+	IFS=$'\n'
+	if [ "$apps" != "" ]; then
+		log
+		log "WARNING: The following programs are currently running.  kscrubber may not"
+		log "         thoroughly clean the files of running programs.  For best results,"
+		log "         quit these programs before proceeding:"
+		log "        $apps"
+		warning=1
+	fi
+fi
+
+# Proceed?
+if ((warning == 1 )) && (( optforce == 0 )); then
+	echo
+	echo "Do you want to proceed? (y/N)"
+	read s1
+	s1=`echo "$s1" | tr A-Z a-z`
+	if [ "$s1" != "y" ] && [ "$s1" != "yes" ]; then
+		log "kscrubber: user aborted"
+		exit 3
+	fi
+fi
+
+backup()  # $1=filespec
+{
+	if [ "$backfolder" != "" ]; then
+		if [ -f "$1" ] && [ ! -e "$backfolder$1" ]; then
+			fdir=`dirname "$backfolder$1"`
+			if [ ! -d "$fdir" ]; then
+				# make backup subfolder
+				mkdir -p "$fdir"
+				# copy original folder ownership & permissions
+				odir=`dirname "$1"`
+				while [ "$odir" != "" ]; do
+					chmod --reference="$odir" "$fdir"
+					chown --reference="$odir" "$fdir"
+					odir=${odir%/*}
+					fdir=${fdir%/*}
+				done
+			fi
+			# copy file
+			cp -fp "$1" "$backfolder$1"
+			err=$?
+			if [ ! -e "$backfolder$1" ] || [ "$err" != "0" ]; then
+				log
+				log "kscrubber: ERROR (stopping): backup of $1 failed"
+				exit 3
+			fi
+			# log backup
+			log "--BACKUP: $1" "verb"
+		fi
+	fi
+}
+
+wipe()  # $1=[-r] if recursive;  $2=filepattern;  NOTE: quote filepattern if wildcard
+        #                                               no spaces in folder/file names
+{
+	if [ "$2" = "" ]; then
+		patt="$1"
+		r=""
+	else
+		patt="$2"
+		r="$1"
+		if [ "$r" != "-r" ]; then
+			log
+			log "kscrubber: ERROR (stopping): internal error wipe() $1 $2"
+			exit 2
+		fi
+	fi
+	# determine, backup, and report files to be removed
+	f=""
+	printed=0
+	if [ "$r" = "-r" ]; then
+		# recursive
+		# expand $patt
+		for fpatt in $patt; do
+			f2=""
+			if [ -d "$fpatt" ]; then
+				fdir="$fpatt"
+				fname="*"
+				f2=`find "$fdir" -name "$fname" 2> /dev/null`
+			elif [ -f "$fpatt" ]; then
+				f2="$fpatt"
+			fi
+			if [ "$f2" != "" ]; then
+				if (( printed == 0 )); then
+					log "COMMAND: $srm $srmarg $r $patt" "verb"
+					printed=1
+				fi
+				for fline in $f2; do
+					backup "$fline"
+					log "  REMOVES: $fline" "verb"
+				done
+			fi
+		done
+	else
+		# non-recursive
+		# check for wildcard
+		pattwild=${patt/\*/--}
+		if [ "${#patt}" != "${#pattwild}" ]; then
+			# wildcard present
+			fdir=`dirname "$patt"`
+			fname=`basename "$patt"`
+			f=`find -H $fdir -maxdepth 1 -type f -name "$fname" 2> /dev/null`
+			if [ "$f" != "" ]; then
+				if (( printed == 0 )); then
+					log "COMMAND: $srm $srmarg $r $patt" "verb"
+					printed=1
+				fi
+				for fline in $f; do
+					backup "$fline"
+					log "  REMOVES: $fline" "verb"
+				done
+			fi
+		else
+			# no wildcard
+			if [ -f "$patt" ]; then
+				backup "$patt"
+				log "REMOVE: $patt" "verb"
+				printed=1
+			fi
+		fi
+	fi
+	# remove
+	if (( optsim != 1 )) && (( printed == 1 )); then
+		$srm $srmarg $r $patt
+		if [ "$?" != "0" ]; then
+			warns=$warns"WARNING: command failed: $srm $srmarg $r $patt\n"
+			log "WARNING: command failed: $srm $srmarg $r $patt"
+		fi
+	fi
+}
+
+edit()  # $1=sedscript;  $2=filespec
+{
+	if [ -e "$2" ]; then
+		backup "$2"
+		log "EDIT-FILE: sed -i \"$1\" \"$2\"" "verb"
+		# command
+		if (( optsim != 1 )); then
+			sed -i "$1" "$2"
+			if [ "$?" != "0" ]; then
+				warns=$warns"WARNING: command failed: sed -i $1 $2\n"
+				log "WARNING: command failed: sed -i $1 $2\n"
+			fi
+		fi
+	fi
+}
+
+anycommand()  # $*=commandstring   - NOTE: quotes not forwarded
+{
+	IFS=" "
+	log "COMMAND: $*" "verb"
+	if (( optsim != 1 )); then
+		$* > /dev/null 2> /dev/null
+		# do not log failure - designed to ignore failures
+	fi
+	IFS=$'\n'
+}
+
+
+# Clean system files
+if (( optclean == 1 )) && (( optkeepsystem == 0 )); then
+	log
+	log "Cleaning system files..."
+
+	# /var/crash
+	wipe "/var/crash/*"        # Ubuntu only
+
+	# /tmp
+	wipe -r "/tmp/*.tmp"
+
+	# clear file /var/lib/mlocate/mlocate.db of old filenames
+	wipe "/var/lib/mlocate/mlocate.db"
+
+	if (( optkeepsystemlogs == 0 )); then
+		log
+		log "Cleaning system logs..."
+		f=`find /var/log -type f -name "*" 2> /dev/null`
+		if [ "$f" != "" ]; then
+			for fline in $f; do
+				wipe "$fline"
+			done
+		fi
+	fi
+
+fi
+
+# Disable Akonadi, Soprano and Nepomuk
+if (( optkillindex == 1 )); then
+	log
+	log "Disabling Akonadi, Soprano and Nepomuk..."
+	log "(these files may not exist on your system)" "verb"
+	anycommand killall -rq akonadi
+	anycommand killall -rq nepomuk
+	anycommand killall -rq soprano
+	sleep 1
+	anycommand mkdir -p /usr/share/autostart/disabled
+	# disable nepomuk
+	backup /usr/share/autostart/nepomukserver.desktop
+	anycommand mv -f /usr/share/autostart/nepomukserver.desktop /usr/share/autostart/disabled
+	backup /usr/bin/nepomuk-rcgen
+	anycommand mv -f /usr/bin/nepomuk-rcgen /usr/bin/nepomuk-rcgen-x
+	backup /usr/bin/nepomukserver
+	anycommand mv -f /usr/bin/nepomukserver /usr/bin/nepomukserver-x
+	backup /usr/bin/nepomukservicestub
+	anycommand mv -f /usr/bin/nepomukservicestub /usr/bin/nepomukservicestub-x
+	anycommand chmod ugo-x "/usr/bin/nepomuk*"
+	# disable soprano
+	backup /usr/bin/sopranocmd
+	anycommand mv -f /usr/bin/sopranocmd /usr/bin/sopranocmd-x
+	backup /usr/bin/sopranod
+	anycommand mv -f /usr/bin/sopranod /usr/bin/sopranod-x
+	anycommand chmod ugo-x "/usr/bin/soprano*"
+	# disable akonadi
+	backup /usr/bin/akonadi_control
+	anycommand mv -f /usr/bin/akonadi_control /usr/bin/akonadi_control-x
+	backup /usr/bin/akonadictl
+	anycommand mv -f /usr/bin/akonadictl /usr/bin/akonadictl-x
+	backup /usr/bin/akonadiserver
+	anycommand mv -f /usr/bin/akonadiserver /usr/bin/akonadiserver-x
+	anycommand chmod ugo-x "/usr/bin/akonadi*"
+
+	# clean user index files
+	if (( optkeepuser == 0 )); then
+		wipe -r "/root/.local/share/akonadi/*"
+		wipe -r "/home/*/.local/share/akonadi/*"
+		wipe -r "/root/.kde4/share/apps/nepomuk/*"
+		wipe -r "/home/*/.kde4/share/apps/nepomuk/*"
+	else
+		warns=$warns"WARNING: retained user Akonadi, Soprano and Nepomuk files\n"
+	fi
+fi
+
+cleanuser () {   #$1=username
+	user="$1"
+	if [ "$user" = "root" ]; then
+		userhome="/root"
+	else
+		userhome="/home/$user"
+	fi
+
+	log
+	log "Cleaning files for user $user..."
+
+	# .kde, .kde3,.kde4
+	kde=".kde"
+	kde0=0
+	kde3=0
+	kde4=0
+	if [ -d "$userhome/.kde3" ]; then
+		kde3=1
+		kde=".kde3"
+	fi
+	if [ -d "$userhome/.kde4" ]; then
+		kde4=1
+		kde=".kde4"
+	fi
+	if [ -d "$userhome/.kde" ]; then
+		kde0=1
+		kde=".kde"
+	fi
+	if (( kde0 + kde3 + kde4 > 1 )); then
+		warns=$warns"WARNING: user $user has multiple .kde folders - only $kde cleaned\n"
+	fi
+
+	# var/tmp and /tmp/kde-*
+	kde3running=`ps -A | grep " kdesktop"`
+	kde4running=`ps -A | grep kded4`
+	if [ "$kde3running" = "" ] && [ "$kde4running" = "" ]; then
+		# KDE apps aren't running, so remove /var/tmp/kdecache-*/*
+		# preserve /var/tmp/kdecache-$user/favicons
+		anycommand mv -f /var/tmp/kdecache-$user/favicons /var/tmp/kdecache-$user-favicons-kscrubber.tmp
+		wipe -r "/var/tmp/kdecache-$user/*"
+		anycommand mv -f /var/tmp/kdecache-$user-favicons-kscrubber.tmp /var/tmp/kdecache-$user/favicons
+	fi
+	wipe -r "/tmp/kde-$user/*"
+
+	# /home
+	wipe -r "$userhome/.thumbnails/*"
+	wipe "$userhome/.bash_history"
+	wipe "$userhome/.recently-used*"
+	wipe "$userhome/.xsession-errors"
+	wipe "$userhome/$kde/share/apps/RecentDocuments/.[a-zA-Z0-9]*"
+	wipe "$userhome/$kde/share/apps/RecentDocuments/*"
+
+	# Empty trash
+	wipe -r "$userhome/.local/share/Trash/files/.[a-zA-Z0-9]*"
+	wipe -r "$userhome/.local/share/Trash/info/.[a-zA-Z0-9]*"
+	wipe -r "$userhome/.local/share/Trash/files/*"
+	wipe -r "$userhome/.local/share/Trash/info/*"
+
+	# misc app files
+	wipe "$userhome/.aMule/logfile"
+	wipe "$userhome/.aMule/logfile.bak"
+	wipe "$userhome/$kde/share/apps/kpdf/*.xml"
+	wipe "$userhome/.gftp/cache/.[a-zA-Z0-9]*"
+	wipe "$userhome/.gftp/cache/*"
+	wipe "$userhome/.gftp/gftp.log"
+	wipe "$userhome/.mplayer/gui.history"
+	wipe "$userhome/.mplayer/gui.pl"
+	wipe "$userhome/.mplayer/gui.url"
+	wipe "$userhome/.gqview/history"
+	wipe -r "$userhome/.gqview/collections/*"
+	wipe -r "$userhome/.gqview/metadata/*"
+	wipe -r "$userhome/.gqview/thumbnails/*"
+	wipe -r "$userhome/.gqview/trash/*"
+	wipe "$userhome/.local/share/parcellite/history"
+	wipe -r "$userhome/.java/deployment/cache/.[a-zA-Z0-9]*"
+	wipe -r "$userhome/.java/deployment/cache/*"
+
+	# Pidgin tests  (no modifications)
+	if [ -e "$userhome/.purple/prefs.xml" ]; then
+		test=`grep "<pref name='log_ims' type='bool' value='1'/>" $userhome/.purple/prefs.xml`
+		test2=`grep "<pref name='log_chats' type='bool' value='1'/>" $userhome/.purple/prefs.xml`
+		if [ "$test$test2" != "" ]; then
+			warns=$warns"WARNING: user $user has Pidgin logging enabled\n"
+		fi
+	fi
+	if [ -d "$userhome/.purple/logs" ]; then
+		test=`find "$userhome/.purple/logs" -type f -name "*" 2> /dev/null`
+		if [ "$test" != "" ]; then
+			warns=$warns"WARNING: $userhome/.purple/logs/ (Pidgin) not empty\n"
+		fi
+	fi
+
+	# Googleearth tests
+	if [ -d "$userhome/.googleearth" ]; then
+		warns=$warns"WARNING: $userhome/.googleearth/ has not been cleaned (by design)\n"
+	fi
+	wipe "$userhome/.googleearth/crashlogs/*"
+
+	# Klipper
+	wipe "$userhome/$kde/share/apps/klipper/history*"
+	if [ "$user" != "root" ]; then
+		log "COMMAND: su $user -c \"qdbus org.kde.klipper /klipper org.kde.klipper.klipper.clearClipboardHistory\"" "verb"
+		if (( optsim != 1 )); then
+			su $user -c "qdbus org.kde.klipper /klipper org.kde.klipper.klipper.clearClipboardHistory" > /dev/null 2> /dev/null
+		fi
+	fi
+	if [ -e $userhome/$kde/share/config/klipperrc ] && [ "$user" != "root" ]; then
+		test=`grep "KeepClipboardContents=false" $userhome/$kde/share/config/klipperrc`
+		if [ "$test" = "" ]; then
+			warns=$warns"WARNING: user $user klipper set to save history on exit\n"
+		fi
+	fi
+
+	# Firefox
+	test=`ps -A | grep " firefox"`
+	if [ "$test" = "" ]; then
+		wipe "$userhome/.mozilla/firefox/*/cookies.*"
+		wipe "$userhome/.mozilla/firefox/*/bookmarkbackups/*"
+		wipe -r "$userhome/.mozilla/firefox/*/Cache/*"
+		wipe -r "$userhome/.mozilla/firefox/*/Cache.Trash/*"
+		wipe -r "$userhome/.mozilla/firefox/*/OfflineCache/*"
+		wipe "$userhome/.mozilla/firefox/*/downloads.*"
+		wipe "$userhome/.mozilla/firefox/*/formhistory.*"
+		# Remove residual data from firefox sqlite databases
+		# this section not needed unless vacuum-all section is disabled
+		#if [ -d $userhome/.mozilla ]; then
+		#	f=`find $userhome/.mozilla -type f -name '*.sqlite' 2> /dev/null`
+		#	if [ "$f" != "" ]; then
+		#		for fline in $f; do
+		#			backup "$fline"
+		#			log "VACUUM: $fline" "verb"
+		#			if (( optsim != 1 )); then
+		#				sqlite3 "$fline" 'VACUUM;'
+		#			fi
+		#		done
+		#	fi
+		#fi
+		# Remove Flash cookies
+		wipe -r "$userhome/.adobe/Flash_Player/*"
+		wipe -r "$userhome/.macromedia/Flash_Player/*"
+	fi
+	# due to space in folder name...
+	findcr=`find -H $userhome/.mozilla/firefox/Crash\ Reports/pending/ -mindepth 1 -maxdepth 1 -type f 2> /dev/null`
+	for cr in $findcr; do
+		wipe "$cr"
+	done
+	wipe "$userhome/.mozilla/firefox/*/sessionstore*.js"
+	if [ -e "$userhome/.mozilla/firefox/Crash Reports/crashreporter.ini" ]; then
+		test=`grep "^SubmitReport=0" "$userhome/.mozilla/firefox/Crash Reports/crashreporter.ini"`
+		if [ "$test" = "" ]; then
+			warns=$warns"WARNING: user $user has Firefox Crash Reports enabled\n"
+		fi
+	fi
+
+	# Vacuum all sqlite databases in home - frees space and improves security
+	f=`find $userhome -type f -name '*.sqlite' 2> /dev/null`
+	if [ "$f" != "" ]; then
+		for fline in $f; do
+			# vacuum $fline if not in a kscrubber backup folder
+			test="${fline/kscrubber-/-}"
+			if [ "${#test}" = "${#fline}" ]; then
+				backup "$fline"
+				log "VACUUM: $fline" "verb"
+				if (( optsim != 1 )); then
+					sqlite3 "$fline" 'VACUUM;'
+				fi
+			fi
+		done
+	fi
+
+	# Konqueror
+	wipe -r "/var/tmp/kdecache-$user/http/*"
+	wipe "$userhome/$kde/share/apps/konqueror/konq_history*"
+	wipe "$userhome/$kde/share/apps/konqueror/closeditems_saved*"
+	wipe "$userhome/$kde/share/apps/konqueror/autosave/.[a-zA-Z0-9]*"
+	wipe "$userhome/$kde/share/apps/konqueror/autosave/*"
+	wipe "$userhome/$kde/share/apps/konqueror/faviconrc*"    #defunct?
+	wipe "$userhome/$kde/share/apps/konqueror/bookmarks.xml.*"
+	wipe "$userhome/$kde/share/config/konq_history*"
+	wipe "$userhome/$kde/share/apps/kcookiejar/cookies*"
+	wipe "$userhome/$kde/share/apps/khtml/formcompletions*"    #defunct?
+	edit 's/\(^Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/konquerorrc
+	edit 's/\(^Paths\[\$e\]=\).*/\1/' $userhome/$kde/share/config/konquerorrc
+	edit 's/\(^History list=\).*/\1/' $userhome/$kde/share/config/konquerorrc
+	# only remove favicons which are not bookmarked
+	f=`find /var/tmp/kdecache-$user/favicons -maxdepth 1 -type f -name '*' 2> /dev/null`
+	if [ "$f" != "" ]; then
+		for fline in $f; do
+			ficon=`basename "$fline"`
+			ficon="${ficon%.*}"
+			test=`grep "<bookmark:icon name=\"favicons/$ficon" \
+			 "$userhome/$kde/share/apps/konqueror/bookmarks.xml"`
+			if [ "$test" = "" ]; then
+				wipe "$fline"
+			fi
+		done
+	fi
+
+	# Arora
+	wipe "$userhome/.local/share/data/Arora/cookies*"
+	wipe "$userhome/.local/share/data/Arora/history*"
+	wipe "$userhome/.cache/Arora/WebpageIcons.db"
+	wipe -r "$userhome/.cache/Arora/browser/http*/*"
+	wipe -r "$userhome/.cache/Arora/browser/prepared/*"
+
+	# krusader
+	edit 's/\(^PopularUrls=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^PopularUrlsRank=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^SearchFor Completion=\).*/\1*,krusader/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^SearchFor History=\).*/\1*,krusader/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^ContainsText Completion=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^ContainsText History=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^Search For=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^Search Pattern History=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^Replacement Text History=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^Left Directory History=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+	edit 's/\(^Right Directory History=\).*/\1/' $userhome/$kde/share/config/krusaderrc
+
+	# kate
+	edit 's/\(^Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/katerc
+	edit 's/\(^Replacement Text History=\).*/\1/' $userhome/$kde/share/config/katerc
+	edit 's/\(^Search Pattern History=\).*/\1/' $userhome/$kde/share/config/katerc
+	edit 's/\(^LastSearchFiles=\).*/\1*/' $userhome/$kde/share/config/katerc
+	edit 's/\(^LastSearchItems=\).*/\1/' $userhome/$kde/share/config/katerc
+	edit 's/\(^LastSearchPaths=\).*/\1/' $userhome/$kde/share/config/katerc
+	wipe "$userhome/$kde/share/apps/kate/metainfos"
+
+	# kdeglobals
+	edit 's/\(^History Items\[\$e\]=\).*/\1/' $userhome/$kde/share/config/kdeglobals
+	edit 's/\(^Recent URLs\[\$e\]=\).*/\1/' $userhome/$kde/share/config/kdeglobals
+
+	# gwenview
+	edit 's/\(^Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/gwenviewrc
+	wipe "$userhome/$kde/share/apps/gwenview/recenturls/*"
+	wipe -r "$userhome/$kde/share/apps/gwenview/recentfolders/*"
+
+	# kaffeine
+	edit 's/^File.*\[\$e\]=.*//' $userhome/$kde/share/config/kaffeinerc
+	edit 's/^Name.*\[\$e\]=.*//' $userhome/$kde/share/config/kaffeinerc
+
+	# filelight
+	edit 's/^File.*\[\$e\]=.*//' $userhome/$kde/share/config/filelightrc
+	edit 's/^Name.*\[\$e\]=.*//' $userhome/$kde/share/config/filelightrc
+	edit 's/^comboHistory\[\$e\]=.*//' $userhome/$kde/share/config/filelightrc
+
+	# k3b
+	edit 's/\(^Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/k3brc
+	edit 's/^File.*\[\$e\]=.*//' $userhome/$kde/share/config/k3brc
+	edit 's/^Name.*\[\$e\]=.*//' $userhome/$kde/share/config/k3brc
+	edit 's/\(^image path\[\$e\]=\).*/\1/' $userhome/$kde/share/config/k3brc
+	edit 's/\(^last written image\[\$e\]=\).*/\1/' $userhome/$kde/share/config/k3brc
+	edit 's/\(^recent images\[\$e\]=\).*/\1/' $userhome/$kde/share/config/k3brc
+	wipe "$userhome/$kde/share/apps/k3b/lastlog*"
+	wipe -r "$userhome/$kde/share/apps/k3b/temp/.[a-zA-Z0-9]*"
+	wipe -r "$userhome/$kde/share/apps/k3b/temp/*"
+
+	# ark
+	edit 's/^File.*\[\$e\]=.*//' $userhome/$kde/share/config/arkrc
+	edit 's/^Name.*\[\$e\]=.*//' $userhome/$kde/share/config/arkrc
+
+	# okular
+	edit 's/^File.*\[\$e\]=.*//' $userhome/$kde/share/config/okularrc
+	edit 's/^Name.*\[\$e\]=.*//' $userhome/$kde/share/config/okularrc
+	wipe "$userhome/$kde/share/apps/okular/docdata/*"
+	# kmail
+	edit 's/\(^folders\[\$e\]=\).*/\1/' $userhome/$kde/share/config/kmailrc
+	edit 's/\(^Recent Addresses=\).*/\1/' $userhome/$kde/share/config/kmailrc
+	edit 's/\(^Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/kmailrc
+	edit 's/\(^Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/kaddressbookrc
+
+	# plasma
+	if [ ! -h $userhome/$kde/share/config/plasma-desktop-appletsrc ]; then
+		edit 's/\(^label[0-9]*=\)file\:\/\/.*/\1/' $userhome/$kde/share/config/plasma-desktop-appletsrc
+	fi
+
+	# krunner
+	edit 's/^PastQueries=.*/PastQueries=/' $userhome/$kde/share/config/krunnerrc
+	edit 's/^LaunchCounts=.*/LaunchCounts=/' $userhome/$kde/share/config/krunnerrc
+	if [ "$user" != "root" ];then
+		log "COMMAND: su $user -c \"qdbus org.kde.krunner /App org.kde.krunner.App.clearHistory\"" "verb"
+		if (( optsim != 1 )); then
+			su $user -c "qdbus org.kde.krunner /App org.kde.krunner.App.clearHistory" > /dev/null 2> /dev/null
+		fi
+	fi
+
+	# avidemux
+	edit s'/\(<file.*>\).*\(<\/file.*>\)/\1\2/' $userhome/.avidemux/config
+	edit s'/\(<lastdir_read>\).*\(<\/lastdir_read>\)/\1\2/' $userhome/.avidemux/config
+	edit s'/\(<lastdir_write>\).*\(<\/lastdir_write>\)/\1\2/' $userhome/.avidemux/config
+
+	# epdfview
+	edit s'/^\(folder=\).*/\1/' $userhome/.config/epdfview/main.conf
+
+	# kgrab
+	edit s'/^\(filename\[\$e\]=\).*/\1/' $userhome/$kde/share/config/kgrabrc
+
+	# krename
+	edit s'/^\(default\[\$e\]=\).*/\1/' $userhome/$kde/share/config/krenamerc
+	edit s'/^\(Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/krenamerc
+	edit 's/^CompletionList=.*/CompletionList=/' $userhome/$kde/share/config/krenamerc
+	edit 's/^HistoryList=.*/HistoryList=/' $userhome/$kde/share/config/krenamerc
+
+	# ktorrent
+	wipe "$userhome/$kde/share/apps/ktorrent/log*"
+	wipe "$userhome/$kde/share/apps/ktorrent/search_history"
+	wipe "$userhome/$kde/share/apps/ktorrent/current_searches"
+	edit s'/^\(Recent Files\[\$e\]=\).*/\1/' $userhome/$kde/share/config/ktorrentrc
+	edit s'/^\(saveTorrentData\[\$e\]=\).*/\1/' $userhome/$kde/share/config/ktorrentrc
+
+	# openoffice
+	wipe "$userhome/.openoffice.org/3/user/registry/data/org/openoffice/Office/Histories.xcu"
+
+	# smplayer
+	wipe "$userhome/.config/smplayer/smplayer_files.ini"
+	edit s'/^\(latest_dir=\).*/\1/' $userhome/.config/smplayer/smplayer.ini
+	edit s'/^\(last_dvd_directory=\).*/\1/' $userhome/.config/smplayer/smplayer.ini
+	edit s'/^\(recents=\).*/\1/' $userhome/.config/smplayer/smplayer.ini
+	edit s'/^\(urls=\).*/\1@Invalid()/' $userhome/.config/smplayer/smplayer.ini
+	wipe "$userhome/.config/smplayer/screenshots/*"
+
+	# speedcrunch
+	edit s'/^History\\.*//' $userhome/.config/SpeedCrunch/SpeedCrunch.conf
+	edit s'/^Variables\\.*//' $userhome/.config/SpeedCrunch/SpeedCrunch.conf
+
+	# vlc
+	edit s'/^\(filedialog-path=\).*/\1/' $userhome/.config/vlc/vlc-qt-interface.conf
+	edit s'/^\(list=\).*/\1/' $userhome/.config/vlc/vlc-qt-interface.conf
+}
+
+# Clean user files
+if (( optclean == 1 )) && (( optkeepuser == 0 )); then
+	# clean user residue in /tmp
+	wipe "/tmp/*.pdf"
+	wipe "/tmp/*.torrent"
+	wipe "/tmp/Flash*"
+	wipe "/tmp/mplay*"
+	wipe "/tmp/clipboardcache*"
+	# root user
+	cleanuser root
+	# other users
+	curdir=`pwd`
+	cd /home
+	for userx in *
+	do
+		cleanuser "$userx"
+	done
+	cd "$curdir"
+	kde3running=`ps -A | grep " kdesktop"`
+	kde4running=`ps -A | grep kded4`
+	if [ "$kde3running" != "" ] || [ "$kde4running" != "" ]; then
+		warns=$warns"WARNING: KDE is running so /var/tmp/kdecache-*/ retained\n"
+	fi
+	warns=$warns"WARNING: Firefox and other browser histories should be cleared\n"
+	warns=$warns"         within Firefox by each user BEFORE running kscrubber\n"
+	IFS=" "
+	for app in $applist
+	do
+		test=`ps -A | grep " $app"`
+		if [ "$test" != "" ]; then
+			warns=$warns"WARNING: $app is running - cannot clean thoroughly\n"
+		fi
+	done
+	IFS=$'\n'
+fi
+
+anycommand updatedb
+
+# Checks
+if (( checkcount > 0 )); then
+	if [ "$warns" != "" ]; then
+		log
+		log "$warns"
+	fi
+	for ((a=0; a <= checkcount - 1; a++))
+	do
+		log
+		log "CHECKING in ${checkpath[a]} for files containing ${checkstring[a]}..."
+		log "COMMAND: grep -m 1 -ri \"${checkstring[a]}\" \"${checkpath[a]}\"" "verb"
+		if (( optsim != 1 )); then
+			test=`grep -m 1 -ri "${checkstring[a]}" "${checkpath[a]}"`
+			log "$test"
+			log
+		fi
+		log
+		log "CHECKING in ${checkpath[a]} for filenames containing ${checkstring[a]}..."
+		log "COMMAND: find \"${checkpath[a]}\" -type f -iname \"*${checkstring[a]}*\"" "verb"
+		if (( optsim != 1 )); then
+			test=`find "${checkpath[a]}" -type f -iname "*${checkstring[a]}*" 2> /dev/null`
+			log "$test"
+		fi
+		log "COMMAND: find \"${checkpath[a]}\" -type d -iname \"*${checkstring[a]}*\"" "verb"
+		if (( optsim != 1 )); then
+			test=`find "${checkpath[a]}" -type d -iname "*${checkstring[a]}*" 2> /dev/null`
+			log "$test"
+		fi
+	done
+fi
+
+if [ "$warns" != "" ]; then
+	log
+	if (( checkcount > 0 )); then
+		log "All warnings repeated:"
+	fi
+	log "$warns"
+fi
+
+if [ "$logfile" != "" ]; then
+	log "kscrubber version $version finished $(date +%Y-%m-%d' '%H:%M:%S) on $HOSTNAME"
+else
+	echo "Done."
+fi
+
+exit 0
+
+# CHANGELOG
+# 1.2.8:  firefox4 cache change
+
