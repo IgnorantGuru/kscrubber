@@ -8,3 +8,4 @@ Copyright: COPYING
 Changelog: changelog
 Readme: README
 Depends: secure-delete, sqlite3
+Files: kscrubber /usr/bin/
